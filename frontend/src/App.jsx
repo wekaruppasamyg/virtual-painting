@@ -1,9 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 
 const BACKEND_HTTP = (import.meta.env.VITE_BACKEND_URL || "https://virtual-painting-qmt7.onrender.com")
   .replace(/\/$/, "");
-const BACKEND_WS = `${BACKEND_HTTP.replace(/^http/, "ws")}/ws/camera`;
-
 const COLORS = [
   { name: "Red", hex: "#EF4444" },
   { name: "Orange", hex: "#F97316" },
@@ -26,10 +25,10 @@ function hexToRgb(hex) {
 }
 
 export default function App() {
-  const imgRef = useRef(null);
   const cameraVideoRef = useRef(null);
-  const cameraCanvasRef = useRef(null);
-  const wsRef = useRef(null);
+  const outputCanvasRef = useRef(null);
+  const paintingCanvasRef = useRef(null);
+  const settingsRef = useRef({ color: COLORS[0].hex, brushSize: 8, tool: "draw" });
 
   const [connected, setConnected] = useState(false);
   const [activeColor, setActiveColor] = useState(COLORS[0].hex);
@@ -37,61 +36,104 @@ export default function App() {
   const [tool, setTool] = useState("draw"); // "draw" | "eraser"
   const [saveMsg, setSaveMsg] = useState("");
 
-  // --- WebSocket video stream ---
-  useEffect(() => {
-    const ws = new WebSocket(BACKEND_WS);
-    let mediaStream;
-    let sendTimer;
-    let frameInFlight = false;
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
+  settingsRef.current = { color: activeColor, brushSize, tool };
 
-    ws.onopen = async () => {
+  // --- Local camera and hand tracking: no Render round-trip ---
+  useEffect(() => {
+    let mediaStream;
+    let animationId;
+    let landmarker;
+    let lastVideoTime = -1;
+    let previousPoint = null;
+
+    const start = async () => {
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 320 }, height: { ideal: 180 }, frameRate: { ideal: 15, max: 15 } },
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } },
           audio: false,
         });
         const video = cameraVideoRef.current;
+        const output = outputCanvasRef.current;
+        const painting = paintingCanvasRef.current;
         video.srcObject = mediaStream;
         await video.play();
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
+        );
+        landmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+            delegate: "GPU",
+          },
+          runningMode: "VIDEO",
+          numHands: 1,
+          minHandDetectionConfidence: 0.6,
+          minHandPresenceConfidence: 0.6,
+          minTrackingConfidence: 0.6,
+        });
+        output.width = painting.width = 640;
+        output.height = painting.height = 480;
         setConnected(true);
-        sendTimer = window.setInterval(() => {
-          if (frameInFlight || ws.readyState !== WebSocket.OPEN || video.readyState < 2) return;
-          const canvas = cameraCanvasRef.current;
-          canvas.width = 240;
-          canvas.height = 135;
-          canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-          canvas.toBlob((blob) => {
-            if (blob && ws.readyState === WebSocket.OPEN) {
-              frameInFlight = true;
-              ws.send(blob);
+
+        const drawFrame = () => {
+          if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+            lastVideoTime = video.currentTime;
+            const outputContext = output.getContext("2d");
+            const paintingContext = painting.getContext("2d");
+            outputContext.save();
+            outputContext.scale(-1, 1);
+            outputContext.drawImage(video, -output.width, 0, output.width, output.height);
+            outputContext.restore();
+            const result = landmarker.detectForVideo(video, performance.now());
+            const hand = result.landmarks?.[0];
+            const settings = settingsRef.current;
+            if (hand) {
+              const index = hand[8];
+              const point = { x: (1 - index.x) * output.width, y: index.y * output.height };
+              const indexUp = hand[8].y < hand[6].y;
+              const middleUp = hand[12].y < hand[10].y;
+              const drawing = indexUp && !middleUp;
+              if (drawing) {
+                if (previousPoint) {
+                  paintingContext.strokeStyle = settings.tool === "eraser" ? "rgba(0,0,0,1)" : settings.color;
+                  paintingContext.lineWidth = settings.tool === "eraser" ? 40 : settings.brushSize;
+                  paintingContext.globalCompositeOperation = settings.tool === "eraser" ? "destination-out" : "source-over";
+                  paintingContext.lineCap = "round";
+                  paintingContext.beginPath();
+                  paintingContext.moveTo(previousPoint.x, previousPoint.y);
+                  paintingContext.lineTo(point.x, point.y);
+                  paintingContext.stroke();
+                }
+                previousPoint = point;
+              } else {
+                previousPoint = null;
+              }
+              outputContext.fillStyle = settings.tool === "eraser" ? "white" : settings.color;
+              outputContext.beginPath();
+              outputContext.arc(point.x, point.y, 7, 0, Math.PI * 2);
+              outputContext.fill();
+            } else {
+              previousPoint = null;
             }
-          }, "image/jpeg", 0.4);
-        }, 50);
+            outputContext.globalCompositeOperation = "source-over";
+            outputContext.drawImage(painting, 0, 0);
+            outputContext.fillStyle = "white";
+            outputContext.font = "bold 22px sans-serif";
+            outputContext.fillText(`${hand ? "READY" : "NO HAND"}  |  tool: ${settings.tool}`, 12, 30);
+          }
+          animationId = requestAnimationFrame(drawFrame);
+        };
+        drawFrame();
       } catch (error) {
         setConnected(false);
       }
     };
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
-
-    ws.onmessage = (event) => {
-      frameInFlight = false;
-      const blob = new Blob([event.data], { type: "image/jpeg" });
-      const url = URL.createObjectURL(blob);
-      if (imgRef.current) {
-        const prevUrl = imgRef.current.dataset.blobUrl;
-        imgRef.current.src = url;
-        imgRef.current.dataset.blobUrl = url;
-        if (prevUrl) URL.revokeObjectURL(prevUrl);
-      }
-    };
+    start();
 
     return () => {
-      window.clearInterval(sendTimer);
+      cancelAnimationFrame(animationId);
       if (mediaStream) mediaStream.getTracks().forEach((track) => track.stop());
-      ws.close();
+      if (landmarker) landmarker.close();
     };
   }, []);
 
@@ -123,28 +165,18 @@ export default function App() {
   };
 
   const handleClear = () => {
-    api("/api/clear", {});
+    const canvas = paintingCanvasRef.current;
+    if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
   };
 
   const handleSave = async () => {
-    setSaveMsg("Saving...");
-    try {
-      const res = await fetch(`${BACKEND_HTTP}/api/save`, { method: "POST" });
-      const data = await res.json();
-      if (data.ok) {
-        const link = document.createElement("a");
-        link.href = `${BACKEND_HTTP}/api/download/${data.filename}`;
-        link.download = data.filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setSaveMsg(`Saved: ${data.filename}`);
-      } else {
-        setSaveMsg(`Error: ${data.error || "unknown"}`);
-      }
-    } catch (e) {
-      setSaveMsg("Error saving painting");
-    }
+    const canvas = outputCanvasRef.current;
+    if (!canvas) return;
+    const link = document.createElement("a");
+    link.download = `virtual-painting-${Date.now()}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+    setSaveMsg("Painting downloaded");
     setTimeout(() => setSaveMsg(""), 3000);
   };
 
@@ -160,11 +192,11 @@ export default function App() {
       <div style={styles.main}>
         <div style={styles.videoWrap}> 
           <video ref={cameraVideoRef} muted playsInline style={{ display: "none" }} />
-          <canvas ref={cameraCanvasRef} style={{ display: "none" }} />
-          <img ref={imgRef} alt="Live painting stream" style={styles.video} />
+          <canvas ref={paintingCanvasRef} style={{ display: "none" }} />
+          <canvas ref={outputCanvasRef} aria-label="Live painting camera" style={styles.video} />
           {!connected && (
             <div style={styles.overlay}>
-              Waiting for backend at <code>{BACKEND_WS}</code>...
+              Starting local camera and hand tracking...
             </div>
           )}
         </div>
