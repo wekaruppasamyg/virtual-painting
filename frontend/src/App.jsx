@@ -42,6 +42,7 @@ export default function App() {
     const ws = new WebSocket(BACKEND_WS);
     let mediaStream;
     let sendTimer;
+    let frameInFlight = false;
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
@@ -53,15 +54,18 @@ export default function App() {
         await video.play();
         setConnected(true);
         sendTimer = window.setInterval(() => {
-          if (ws.readyState !== WebSocket.OPEN || video.readyState < 2) return;
+          if (frameInFlight || ws.readyState !== WebSocket.OPEN || video.readyState < 2) return;
           const canvas = cameraCanvasRef.current;
-          canvas.width = video.videoWidth || 640;
-          canvas.height = video.videoHeight || 480;
+          canvas.width = 640;
+          canvas.height = 360;
           canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
           canvas.toBlob((blob) => {
-            if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
-          }, "image/jpeg", 0.7);
-        }, 100);
+            if (blob && ws.readyState === WebSocket.OPEN) {
+              frameInFlight = true;
+              ws.send(blob);
+            }
+          }, "image/jpeg", 0.55);
+        }, 50);
       } catch (error) {
         setConnected(false);
       }
@@ -70,6 +74,7 @@ export default function App() {
     ws.onerror = () => setConnected(false);
 
     ws.onmessage = (event) => {
+      frameInFlight = false;
       const blob = new Blob([event.data], { type: "image/jpeg" });
       const url = URL.createObjectURL(blob);
       if (imgRef.current) {
