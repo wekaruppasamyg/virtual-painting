@@ -56,8 +56,8 @@ export default function App() {
         sendTimer = window.setInterval(() => {
           if (frameInFlight || ws.readyState !== WebSocket.OPEN || video.readyState < 2) return;
           const canvas = cameraCanvasRef.current;
-          canvas.width = 640;
-          canvas.height = 360;
+          canvas.width = 320;
+          canvas.height = 180;
           canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
           canvas.toBlob((blob) => {
             if (blob && ws.readyState === WebSocket.OPEN) {
