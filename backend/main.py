@@ -403,6 +403,67 @@ def _autosave():
     cv2.imwrite(filepath, canvas_copy)
 
 
+def process_browser_frame(frame):
+    """Process a webcam frame received from a browser client."""
+    height, width, _ = frame.shape
+    with state.lock:
+        if state.canvas is None or state.canvas.shape[:2] != (height, width):
+            state.canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        canvas = state.canvas
+
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb)
+    cursor_point = None
+    is_drawing = False
+    mode_label = "NO HAND"
+
+    if results.multi_hand_landmarks and results.multi_handedness:
+        landmarks = results.multi_hand_landmarks[0]
+        handedness = results.multi_handedness[0].classification[0].label
+        mp_draw.draw_landmarks(frame, landmarks, mp_hands.HAND_CONNECTIONS)
+        index_tip = landmarks.landmark[8]
+        cursor_point = (int(index_tip.x * width), int(index_tip.y * height))
+        if state.gesture_mode == "pinch":
+            is_drawing = pinch_distance(landmarks.landmark) < PINCH_THRESHOLD
+            mode_label = "DRAWING" if is_drawing else "HOVER"
+        else:
+            up = fingers_up(landmarks.landmark, handedness)
+            is_drawing = up[1] and not up[2]
+            mode_label = "DRAWING" if is_drawing else ("HOVER" if up[1] else "IDLE")
+
+    with state.lock:
+        stroke_started = is_drawing and not state.was_drawing
+        state.was_drawing = is_drawing
+        if stroke_started and state.canvas is not None:
+            state.undo_stack.append(state.canvas.copy())
+            state.redo_stack.clear()
+        if cursor_point is not None and is_drawing and state.canvas is not None:
+            if state.prev_point is None:
+                state.prev_point = cursor_point
+            draw_color = state.color if state.tool == "draw" else (0, 0, 0)
+            size = state.brush_size if state.tool == "draw" else state.eraser_size
+            cv2.line(state.canvas, state.prev_point, cursor_point, draw_color, size, lineType=cv2.LINE_AA)
+            state.prev_point = cursor_point
+        else:
+            state.prev_point = None
+
+        canvas = state.canvas
+        gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
+        bg = cv2.bitwise_and(frame, frame, mask=cv2.bitwise_not(mask))
+        fg = cv2.bitwise_and(canvas, canvas, mask=mask)
+        combined = cv2.add(bg, fg)
+
+        if cursor_point is not None:
+            indicator_color = state.color if state.tool == "draw" else (255, 255, 255)
+            cv2.circle(combined, cursor_point, 8, indicator_color, 2)
+
+    cv2.putText(combined, f"{mode_label}  |  tool: {state.tool}", (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    ok, buffer = cv2.imencode(".jpg", combined, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return buffer.tobytes() if ok else None
+
+
 camera_thread = threading.Thread(target=camera_loop, daemon=True)
 camera_thread.start()
 
@@ -643,6 +704,23 @@ async def stream(websocket: WebSocket):
             if state.latest_jpeg is not None:
                 await websocket.send_bytes(state.latest_jpeg)
             await asyncio.sleep(0.033)  # ~30 fps
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws/camera")
+async def browser_camera(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            frame_data = await websocket.receive_bytes()
+            frame_array = np.frombuffer(frame_data, dtype=np.uint8)
+            frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+            processed = await asyncio.to_thread(process_browser_frame, frame)
+            if processed:
+                await websocket.send_bytes(processed)
     except WebSocketDisconnect:
         pass
 

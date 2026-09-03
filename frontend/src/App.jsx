@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 const BACKEND_HTTP = (import.meta.env.VITE_BACKEND_URL || "https://virtual-painting-qmt7.onrender.com")
   .replace(/\/$/, "");
-const BACKEND_WS = `${BACKEND_HTTP.replace(/^http/, "ws")}/ws/stream`;
+const BACKEND_WS = `${BACKEND_HTTP.replace(/^http/, "ws")}/ws/camera`;
 
 const COLORS = [
   { name: "Red", hex: "#EF4444" },
@@ -27,6 +27,8 @@ function hexToRgb(hex) {
 
 export default function App() {
   const imgRef = useRef(null);
+  const cameraVideoRef = useRef(null);
+  const cameraCanvasRef = useRef(null);
   const wsRef = useRef(null);
 
   const [connected, setConnected] = useState(false);
@@ -38,10 +40,32 @@ export default function App() {
   // --- WebSocket video stream ---
   useEffect(() => {
     const ws = new WebSocket(BACKEND_WS);
+    let mediaStream;
+    let sendTimer;
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = async () => {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const video = cameraVideoRef.current;
+        video.srcObject = mediaStream;
+        await video.play();
+        setConnected(true);
+        sendTimer = window.setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN || video.readyState < 2) return;
+          const canvas = cameraCanvasRef.current;
+          canvas.width = video.videoWidth || 640;
+          canvas.height = video.videoHeight || 480;
+          canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            if (blob && ws.readyState === WebSocket.OPEN) ws.send(blob);
+          }, "image/jpeg", 0.7);
+        }, 100);
+      } catch (error) {
+        setConnected(false);
+      }
+    };
     ws.onclose = () => setConnected(false);
     ws.onerror = () => setConnected(false);
 
@@ -56,7 +80,11 @@ export default function App() {
       }
     };
 
-    return () => ws.close();
+    return () => {
+      window.clearInterval(sendTimer);
+      if (mediaStream) mediaStream.getTracks().forEach((track) => track.stop());
+      ws.close();
+    };
   }, []);
 
   // --- API helpers ---
@@ -123,6 +151,8 @@ export default function App() {
 
       <div style={styles.main}>
         <div style={styles.videoWrap}> 
+          <video ref={cameraVideoRef} muted playsInline style={{ display: "none" }} />
+          <canvas ref={cameraCanvasRef} style={{ display: "none" }} />
           <img ref={imgRef} alt="Live painting stream" style={styles.video} />
           {!connected && (
             <div style={styles.overlay}>
