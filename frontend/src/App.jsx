@@ -48,7 +48,10 @@ export default function App() {
 
     ws.onopen = async () => {
       try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 320 }, height: { ideal: 180 }, frameRate: { ideal: 15, max: 15 } },
+          audio: false,
+        });
         const video = cameraVideoRef.current;
         video.srcObject = mediaStream;
         await video.play();
@@ -56,15 +59,15 @@ export default function App() {
         sendTimer = window.setInterval(() => {
           if (frameInFlight || ws.readyState !== WebSocket.OPEN || video.readyState < 2) return;
           const canvas = cameraCanvasRef.current;
-          canvas.width = 320;
-          canvas.height = 180;
+          canvas.width = 240;
+          canvas.height = 135;
           canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
           canvas.toBlob((blob) => {
             if (blob && ws.readyState === WebSocket.OPEN) {
               frameInFlight = true;
               ws.send(blob);
             }
-          }, "image/jpeg", 0.55);
+          }, "image/jpeg", 0.4);
         }, 50);
       } catch (error) {
         setConnected(false);
