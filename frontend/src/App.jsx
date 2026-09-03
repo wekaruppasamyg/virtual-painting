@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 
-const BACKEND_HTTP = "http://localhost:8000";
-const BACKEND_WS = "ws://localhost:8000/ws/stream";
+const BACKEND_HTTP = (import.meta.env.VITE_BACKEND_URL || "https://virtual-painting-qmt7.onrender.com")
+  .replace(/\/$/, "");
+const BACKEND_WS = `${BACKEND_HTTP.replace(/^http/, "ws")}/ws/stream`;
 
 const COLORS = [
   { name: "Red", hex: "#EF4444" },
@@ -120,9 +121,8 @@ export default function App() {
         </span>
       </header>
 
-
       <div style={styles.main}>
-        <div style={styles.videoWrap}>
+        <div style={styles.videoWrap}> 
           <img ref={imgRef} alt="Live painting stream" style={styles.video} />
           {!connected && (
             <div style={styles.overlay}>
